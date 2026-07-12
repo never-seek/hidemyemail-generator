@@ -20,3 +20,4 @@ android/local.properties
 android/app/build/
 android/build/
 android/*.png
+android/*.apk

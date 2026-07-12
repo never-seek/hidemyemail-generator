@@ -202,7 +202,9 @@ private fun HideMyEmailApp() {
     }
 
     fun saveSettings() {
-        store.saveSettings(region, cookieInput, maildomainHost)
+        val detectedRegion = HmeRepository.detectRegion(cookieInput) ?: region
+        region = detectedRegion
+        store.saveSettings(detectedRegion, cookieInput, maildomainHost)
         message = "已保存本地配置"
     }
 
@@ -262,18 +264,20 @@ private fun HideMyEmailApp() {
                     },
                     onValidate = {
                         saveSettings()
+                        val requestRegion = HmeRepository.detectRegion(cookieInput) ?: region
+                        region = requestRegion
                         scope.launch {
                             busy = true
                             message = "正在校验 Cookie..."
                             val result = runCatching {
                                 withContext(Dispatchers.IO) {
-                                    repository.fetchAccountInfo(currentCookieContext(), region)
+                                    repository.fetchAccountInfo(currentCookieContext(), requestRegion)
                                 }
                             }
                             result.onSuccess { account ->
                                 accountSummary = account.summary()
                                 maildomainHost = account.maildomainHost
-                                store.saveSettings(region, cookieInput, maildomainHost)
+                                store.saveSettings(requestRegion, cookieInput, maildomainHost)
                                 message = "Cookie 可用：${account.appleId}"
                             }.onFailure {
                                 message = it.cleanMessage()
@@ -291,6 +295,8 @@ private fun HideMyEmailApp() {
                     generatedAddresses = generatedAddresses,
                     onGenerate = {
                         saveSettings()
+                        val requestRegion = HmeRepository.detectRegion(cookieInput) ?: region
+                        region = requestRegion
                         val count = countText.toIntOrNull()?.coerceIn(1, 20) ?: 1
                         scope.launch {
                             busy = true
@@ -298,7 +304,7 @@ private fun HideMyEmailApp() {
                             message = "正在生成 $count 个隐藏邮箱..."
                             val result = runCatching {
                                 withContext(Dispatchers.IO) {
-                                    repository.generate(currentCookieContext(), region, label.ifBlank { "generated" }, count)
+                                    repository.generate(currentCookieContext(), requestRegion, label.ifBlank { "generated" }, count)
                                 }
                             }
                             result.onSuccess { addresses ->
@@ -322,12 +328,14 @@ private fun HideMyEmailApp() {
                     addresses = remoteAddresses.filter { it.active == showActive },
                     onRefresh = {
                         saveSettings()
+                        val requestRegion = HmeRepository.detectRegion(cookieInput) ?: region
+                        region = requestRegion
                         scope.launch {
                             busy = true
                             message = "正在读取 iCloud 地址..."
                             val result = runCatching {
                                 withContext(Dispatchers.IO) {
-                                    repository.listAddresses(currentCookieContext(), region)
+                                    repository.listAddresses(currentCookieContext(), requestRegion)
                                 }
                             }
                             result.onSuccess { addresses ->
@@ -908,15 +916,16 @@ class HmeRepository {
 
     companion object {
         fun parseCookieContext(raw: String, region: ICloudRegion): CookieContext {
-            val content = raw.lineSequence()
+            val rawContent = raw.lineSequence()
                 .map { it.trim() }
                 .filter { it.isNotBlank() && !it.startsWith("//") }
                 .joinToString("\n")
                 .trim()
+            val content = rawContent
                 .replace("^\"", "\"")
                 .replace("^'", "'")
 
-            if (content.isBlank()) return CookieContext("")
+            if (rawContent.isBlank()) return CookieContext("")
 
             val explicitHost = Regex("""(?m)^HIDEMYEMAIL_MAILDOMAIN_HOST=([A-Za-z0-9.-]+)\s*$""")
                 .find(content)
@@ -944,6 +953,21 @@ class HmeRepository {
 
             val maildomainHost = explicitHost.ifBlank { shardHost }
 
+            val cmdCookieArg = Regex(
+                """(?:^|\s)(?:-b|--cookie)\s+\^\"(.+?)\^\"\s+\^?\s*-[A-Za-z]""",
+                setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+            ).find(rawContent)?.groupValues?.getOrNull(1)
+            if (!cmdCookieArg.isNullOrBlank()) {
+                val cookie = cmdCookieArg
+                    .replace("^\\^\"", "\"")
+                    .replace("\\\"", "\"")
+                    .replace("^\"", "\"")
+                    .replace("\r", "")
+                    .replace("\n", "")
+                    .trim()
+                return CookieContext(cookie, maildomainHost)
+            }
+
             val cookieFromDoubleQuote = Regex("""(?:^|\s)(?:-b|--cookie)\s+"([^"]+)"""", RegexOption.IGNORE_CASE)
                 .find(content)
                 ?.groupValues
@@ -969,6 +993,16 @@ class HmeRepository {
             }
 
             return CookieContext(content.lines().firstOrNull().orEmpty().trim(), maildomainHost)
+        }
+
+        fun detectRegion(raw: String): ICloudRegion? {
+            val declaredRegion = Regex("""(?m)^HIDEMYEMAIL_REGION=(global|china)\s*$""", RegexOption.IGNORE_CASE)
+                .find(raw)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.lowercase(Locale.ROOT)
+            if (declaredRegion != null) return ICloudRegion.from(declaredRegion)
+            return if (raw.contains("icloud.com.cn", ignoreCase = true)) ICloudRegion.China else null
         }
     }
 }
